@@ -262,9 +262,10 @@ func runAgent() int {
 	// TTY stdin). Both produce a childIO plus the child's *os.Process and a
 	// wait func, so the rest of runAgent is mode-agnostic.
 	var (
-		cio    childIO
-		proc   *os.Process
-		waitFn func() error
+		cio       childIO
+		proc      *os.Process
+		waitFn    func() error
+		waitState func() *os.ProcessState // waitFn's command: go-pty on Windows reports the status only there
 	)
 	if *noPty {
 		// Pipe mode. Child stdin <- inW (we write); child stdout+stderr ->
@@ -300,6 +301,7 @@ func runAgent() int {
 		cio = &pipeIO{r: outR, w: inW}
 		proc = c.Process
 		waitFn = c.Wait
+		waitState = func() *os.ProcessState { return c.ProcessState }
 	} else {
 		// PTY mode. go-pty's Pty is an io.ReadWriteCloser that also exposes
 		// Resize; its Command type is required because on Windows an
@@ -330,6 +332,7 @@ func runAgent() int {
 		cio = ppty
 		proc = c.Process
 		waitFn = c.Wait
+		waitState = func() *os.ProcessState { return c.ProcessState }
 	}
 	defer cio.Close()
 
@@ -552,14 +555,7 @@ func runAgent() int {
 	// Wait for child to exit, broadcast exit, close everything.
 	go func() {
 		err := waitFn()
-		code := 0
-		if ee, ok := err.(*exec.ExitError); ok {
-			code = ee.ExitCode()
-		} else if err == nil {
-			code = 0
-		} else {
-			code = -1
-		}
+		code := exitCodeFromWait(err, waitState())
 		msg, _ := json.Marshal(map[string]int{"code": code})
 		// Publish exit state BEFORE broadcasting so a new connection
 		// arriving during the broadcast sees childExited=true and
@@ -1171,4 +1167,22 @@ func envValueFromList(env []string, key string) string {
 		}
 	}
 	return ""
+}
+
+// exitCodeFromWait is the exit status of the pane's child once Wait has
+// returned. On Unix and in pipe mode Wait returns an *exec.ExitError; on
+// Windows, go-pty's ConPTY command leaves the status only in the command's
+// ProcessState, so read that too. A nil error without a state is success;
+// any other error is -1.
+func exitCodeFromWait(err error, state *os.ProcessState) int {
+	if ee, ok := err.(*exec.ExitError); ok {
+		return ee.ExitCode()
+	}
+	if state != nil {
+		return state.ExitCode()
+	}
+	if err == nil {
+		return 0
+	}
+	return -1
 }
