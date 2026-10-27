@@ -37,6 +37,7 @@ import type { PaneInfo } from '../types';
 import { ApprovalActions } from './ApprovalActions';
 import { logScrollDiag } from '../scrollDiag';
 import { attachPaneImagePasteHandlers } from './paneImagePaste';
+import { attachPaneMousePasteHandlers } from './paneMousePaste';
 import { SwitchInterruptedBanner } from './native/NativeEventViews';
 import { shouldShowSwitchNotice, switchNoticeKey } from '../native/modeSwitch';
 import { PaneBodyOverlays } from './PaneBodyOverlays';
@@ -2774,47 +2775,18 @@ export function Pane({ pane, paneIndex, session: suppliedSession }: Props) {
     // convention that wezterm, gnome-terminal, konsole, kitty and
     // Alacritty all ship: copy-on-select + middle-click paste. Both
     // toggles are read live from the store so flipping them in
-    // Preferences takes effect without remounting the pane.
-    const mouseParityHost = hostRef.current;
-    // Copy-on-select: mirror the finished selection to the clipboard on
-    // mouseup (the end of the gesture) rather than on every
-    // onSelectionChange tick — that fires continuously during a drag and
-    // would hammer navigator.clipboard. A plain click leaves an empty
-    // selection, which getSelection() returns as "" → no-op.
-    const onParityMouseUp = (e: MouseEvent) => {
-      if(!canAct())return;
-      if (e.button !== 0) return;
-      if (!useStore.getState().copyOnSelect) return;
-      const sel = term.getSelection();
-      if (sel) void copyToClipboard(sel);
-    };
-    // Middle-click paste: handle on mousedown so we can preventDefault the
-    // browser's middle-button autoscroll, and because X11 paste fires on
-    // press. Browsers expose no separate PRIMARY slot, so we read the
-    // system clipboard — copy-on-select above is what makes
-    // select→middle-click reproduce the Unix feel. Inject via the same
-    // ws byte path as keystrokes; respect ownership like onData does.
-    const onParityMouseDown = (e: MouseEvent) => {
-      if (e.button !== 1) return;
-      if (!useStore.getState().middleClickPaste) return;
-      e.preventDefault();
-      if (ownedRef.current !== true || !canAct()) return;
-      const releaseInteraction = beginTerminalInteraction(key);
-      if (!releaseInteraction) return;
-      const gesture = captureSessionGesture(session);
-      void Promise.resolve(navigator.clipboard?.readText?.()).then((text) => {
-        if (!gesture() || ownedRef.current !== true) return;
-        if (!text) return;
-        const ws = wsRef.current;
-        if (ws && ws.readyState === WebSocket.OPEN) ws.send(encoder.encode(text));
-      }).catch(() => {}).finally(releaseInteraction);
-    };
-    mouseParityHost?.addEventListener('mouseup', onParityMouseUp);
-    mouseParityHost?.addEventListener('mousedown', onParityMouseDown);
-    const cleanupMouseParity = () => {
-      mouseParityHost?.removeEventListener('mouseup', onParityMouseUp);
-      mouseParityHost?.removeEventListener('mousedown', onParityMouseDown);
-    };
+    // Preferences takes effect without remounting the pane. Middle-click
+    // rides xterm's paste path, so CRLF and bracketed paste behave like
+    // a normal paste (issue #6).
+    const cleanupMouseParity = attachPaneMousePasteHandlers({
+      hostEl: hostRef.current,
+      term,
+      ownedRef,
+      canAct,
+      beginInteraction: () => beginTerminalInteraction(key),
+      captureGuard: () => captureSessionGesture(session),
+      copy: copyToClipboard,
+    });
     // Resize handling — observe the host element.
     //
     // We deliberately go through the WebSocket `resize` frame ONLY,
